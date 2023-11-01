@@ -66,13 +66,13 @@ object EnrichmentManager {
     raw: RawEvent,
     featureFlags: EtlPipeline.FeatureFlags,
     invalidCount: F[Unit]
-  ): EitherT[F, BadRow, EnrichedEvent] =
+  ): EitherT[F, BadRow, ProcessedEvent] =
     for {
       enriched <- EitherT.fromEither[F](setupEnrichedEvent(raw, etlTstamp, processor))
-      extractResult <- IgluUtils.extractAndValidateInputJsons(enriched, client, raw, processor)
+      extractResult <- EitherT.liftF(IgluUtils.extractAndValidateInputJsons(enriched, client))
       _ = {
-        ME.formatUnstructEvent(extractResult.unstructEvent).foreach(e => enriched.unstruct_event = e)
-        ME.formatContexts(extractResult.contexts).foreach(c => enriched.contexts = c)
+        enriched.unstruct_event = ME.formatUnstructEvent(extractResult.unstructEvent).orNull
+        enriched.contexts = ME.formatContexts(extractResult.contexts).orNull
       }
       enrichmentsContexts <- runEnrichments(
                                registry,
@@ -83,7 +83,8 @@ object EnrichmentManager {
                                extractResult.unstructEvent,
                                featureFlags.legacyEnrichmentOrder
                              )
-      _ = ME.formatContexts(enrichmentsContexts ::: extractResult.validationInfoContexts).foreach(c => enriched.derived_contexts = c)
+      _ = ME.formatContexts(enrichmentsContexts ::: extractResult.validationInfoContexts ::: extractResult.validationFailures)
+            .foreach(c => enriched.derived_contexts = c)
       _ <- IgluUtils
              .validateEnrichmentsContexts[F](client, enrichmentsContexts, raw, processor, enriched)
       _ <- EitherT.rightT[F, BadRow](
@@ -95,7 +96,12 @@ object EnrichmentManager {
              }
            }
       _ <- validateEnriched(enriched, raw, processor, featureFlags.acceptInvalid, invalidCount)
-    } yield enriched
+    } yield {
+      if (extractResult.validationFailures.isEmpty)
+        enriched.asRight
+      else
+        enriched.asLeft
+    }
 
   /**
    * Run all the enrichments and aggregate the errors if any

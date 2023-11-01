@@ -16,8 +16,6 @@ import cats.data.{EitherT, Validated, ValidatedNel}
 
 import com.snowplowanalytics.snowplow.badrows.BadRow
 
-import com.snowplowanalytics.snowplow.enrich.common.outputs.EnrichedEvent
-
 package object fs2 {
 
   type Parsed[F[_], A] = EitherT[F, String, A]
@@ -28,7 +26,7 @@ package object fs2 {
   type AttributedByteSink[F[_]] = List[AttributedData[Array[Byte]]] => F[Unit]
 
   /** Enrichment result, containing list of (valid and invalid) results as well as the collector timestamp */
-  type Result = (List[Validated[BadRow, EnrichedEvent]], Option[Long])
+  type Result = (List[Validated[BadRow, ProcessedEvent]], Option[Long])
 
   /** Function to transform an origin raw payload into good and/or bad rows */
   type Enrich[F[_]] = Array[Byte] => F[Result]

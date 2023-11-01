@@ -13,6 +13,7 @@
 package com.snowplowanalytics.snowplow.enrich
 
 import common.enrichments.registry.Enrichment
+import com.snowplowanalytics.snowplow.enrich.common.outputs.EnrichedEvent
 
 /** Scala package object to hold types, helper methods etc. */
 package object common {
@@ -28,6 +29,10 @@ package object common {
 
   /** Parameters extracted from query string */
   type QueryStringParameters = List[(String, Option[String])]
+
+  type PartiallyFailedEvent = EnrichedEvent
+
+  type ProcessedEvent = Either[PartiallyFailedEvent, EnrichedEvent]
 
   /**
    * Type alias for either Throwable or successful value

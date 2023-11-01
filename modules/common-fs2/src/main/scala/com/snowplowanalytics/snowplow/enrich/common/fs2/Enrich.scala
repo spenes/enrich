@@ -193,10 +193,16 @@ object Enrich {
         .map(_.toEither)
         .separate
 
-    val (moreBad, good) = enriched.map { e =>
+    val (partiallyFailed, fullyEnriched) = enriched.separate
+
+    val (moreBad, good) = fullyEnriched.map { e =>
       serializeEnriched(e, env.processor, env.streamsSettings.maxRecordSize)
         .map(bytes => (e, AttributedData(bytes, env.goodPartitionKey(e), env.goodAttributes(e))))
     }.separate
+
+    val partiallyFailedSerialized = partiallyFailed.flatMap { e =>
+      serializeEnriched(e, env.processor, env.streamsSettings.maxRecordSize).toOption
+    }
 
     val allBad = (bad ++ moreBad).map(badRowResize(env, _))
 
@@ -212,7 +218,8 @@ object Enrich {
         env.processor,
         env.streamsSettings.maxRecordSize
       ) *> env.metrics.enrichLatency(chunk.headOption.flatMap(_._2)),
-      sinkBad(allBad, env.sinkBad, env.metrics.badCount)
+      sinkBad(allBad, env.sinkBad, env.metrics.badCount),
+      env.sinkPartiallyFailed(partiallyFailedSerialized)
     ).parSequence_
   }
 

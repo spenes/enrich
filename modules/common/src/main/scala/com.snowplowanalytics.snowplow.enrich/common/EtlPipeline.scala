@@ -27,7 +27,6 @@ import org.joda.time.DateTime
 import com.snowplowanalytics.snowplow.enrich.common.adapters.AdapterRegistry
 import com.snowplowanalytics.snowplow.enrich.common.enrichments.{EnrichmentManager, EnrichmentRegistry}
 import com.snowplowanalytics.snowplow.enrich.common.loaders.CollectorPayload
-import com.snowplowanalytics.snowplow.enrich.common.outputs.EnrichedEvent
 import com.snowplowanalytics.snowplow.enrich.common.utils.HttpClient
 
 /** Expresses the end-to-end event pipeline supported by the Scala Common Enrich project. */
@@ -68,7 +67,7 @@ object EtlPipeline {
     input: ValidatedNel[BadRow, Option[CollectorPayload]],
     featureFlags: FeatureFlags,
     invalidCount: F[Unit]
-  ): F[List[Validated[BadRow, EnrichedEvent]]] =
+  ): F[List[Validated[BadRow, ProcessedEvent]]] =
     input match {
       case Validated.Valid(Some(payload)) =>
         adapterRegistry
@@ -89,11 +88,11 @@ object EtlPipeline {
                   .toValidated
               }
             case Validated.Invalid(badRow) =>
-              Monad[F].pure(List(badRow.invalid[EnrichedEvent]))
+              Monad[F].pure(List(badRow.invalid[ProcessedEvent]))
           }
       case Validated.Invalid(badRows) =>
-        Monad[F].pure(badRows.map(_.invalid[EnrichedEvent])).map(_.toList)
+        Monad[F].pure(badRows.map(_.invalid[ProcessedEvent])).map(_.toList)
       case Validated.Valid(None) =>
-        Monad[F].pure(List.empty[Validated[BadRow, EnrichedEvent]])
+        Monad[F].pure(List.empty[Validated[BadRow, ProcessedEvent]])
     }
 }

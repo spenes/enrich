@@ -111,6 +111,7 @@ final case class Environment[F[_], A](
   sinkGood: AttributedByteSink[F],
   sinkPii: Option[AttributedByteSink[F]],
   sinkBad: ByteSink[F],
+  sinkPartiallyFailed: ByteSink[F],
   checkpoint: List[A] => F[Unit],
   getPayload: A => Array[Byte],
   sentry: Option[SentryClient],
@@ -175,6 +176,7 @@ object Environment {
     sinkGood: Resource[F, AttributedByteSink[F]],
     sinkPii: Option[Resource[F, AttributedByteSink[F]]],
     sinkBad: Resource[F, ByteSink[F]],
+    sinkPartiallyFailed: Resource[F, ByteSink[F]],
     clients: Resource[F, List[Client[F]]],
     checkpoint: List[A] => F[Unit],
     getPayload: A => Array[Byte],
@@ -190,6 +192,7 @@ object Environment {
       sentry <- mkSentry[F](file)
       good <- sinkGood
       bad <- sinkBad
+      partiallyFailed <- sinkPartiallyFailed
       pii <- sinkPii.sequence
       http <- Clients.mkHttp(ec = ec)
       clts <- clients.map(Clients.init(http, _))
@@ -222,6 +225,7 @@ object Environment {
       good,
       pii,
       bad,
+      partiallyFailed,
       checkpoint,
       getPayload,
       sentry,

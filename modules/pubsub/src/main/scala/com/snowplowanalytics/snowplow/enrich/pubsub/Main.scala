@@ -67,6 +67,7 @@ object Main extends IOApp.WithContext {
       (_, out) => Sink.initAttributed(out),
       (_, out) => Sink.initAttributed(out),
       (_, out) => Sink.init(out),
+      (_, out) => Sink.init(out),
       checkpoint,
       List(b => Resource.eval(GcsClient.mk[IO](b))),
       _.value,

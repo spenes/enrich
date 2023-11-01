@@ -50,6 +50,7 @@ object Run {
     mkSinkGood: (Blocker, Output) => Resource[F, AttributedByteSink[F]],
     mkSinkPii: (Blocker, Output) => Resource[F, AttributedByteSink[F]],
     mkSinkBad: (Blocker, Output) => Resource[F, ByteSink[F]],
+    mkSinkPartiallyFailed: (Blocker, Output) => Resource[F, ByteSink[F]],
     checkpoint: List[A] => F[Unit],
     mkClients: List[Blocker => Resource[F, Client[F]]],
     getPayload: A => Array[Byte],
@@ -81,6 +82,7 @@ object Run {
                                 case _ =>
                                   mkSinkBad(blocker, file.output.bad)
                               }
+                    sinkPartiallyFailed = mkSinkPartiallyFailed(blocker, file.output.partiallyFailed)
                     clients = mkClients.map(mk => mk(blocker)).sequence
                     exit <- file.input match {
                               case p: Input.FileSystem =>
@@ -93,6 +95,7 @@ object Run {
                                     sinkGood,
                                     sinkPii,
                                     sinkBad,
+                                    sinkPartiallyFailed,
                                     clients,
                                     _ => Sync[F].unit,
                                     identity,
@@ -123,6 +126,7 @@ object Run {
                                     sinkGood,
                                     sinkPii,
                                     sinkBad,
+                                    sinkPartiallyFailed,
                                     clients,
                                     checkpointing,
                                     getPayload,
