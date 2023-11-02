@@ -17,7 +17,9 @@ import java.nio.charset.Charset
 import java.net.URI
 import java.time.Instant
 import org.joda.time.DateTime
-import io.circe.Json
+import io.circe.{Json, Encoder}
+import io.circe.syntax._
+import io.circe.generic.semiauto._
 import cats.{Applicative, Monad}
 import cats.data.{EitherT, NonEmptyList, OptionT, StateT}
 import cats.effect.Clock
@@ -30,6 +32,7 @@ import com.snowplowanalytics.iglu.client.resolver.registries.RegistryLookup
 
 import com.snowplowanalytics.iglu.core.SelfDescribingData
 import com.snowplowanalytics.iglu.core.circe.implicits._
+import com.snowplowanalytics.iglu.core.{SchemaKey, SchemaVer}
 
 import com.snowplowanalytics.snowplow.badrows._
 import com.snowplowanalytics.snowplow.badrows.{FailureDetails, Payload, Processor}
@@ -66,27 +69,34 @@ object EnrichmentManager {
     raw: RawEvent,
     featureFlags: EtlPipeline.FeatureFlags,
     invalidCount: F[Unit]
-  ): EitherT[F, BadRow, ProcessedEvent] =
+  ): EitherT[F, BadRow, ProcessedEvent] = {
+    val setupEnrichedEventResult = setupEnrichedEvent(raw, etlTstamp, processor)
+    val enriched = setupEnrichedEventResult.event
     for {
-      enriched <- EitherT.fromEither[F](setupEnrichedEvent(raw, etlTstamp, processor))
       extractResult <- EitherT.liftF(IgluUtils.extractAndValidateInputJsons(enriched, client))
       _ = {
         enriched.unstruct_event = ME.formatUnstructEvent(extractResult.unstructEvent).orNull
         enriched.contexts = ME.formatContexts(extractResult.contexts).orNull
       }
-      enrichmentsContexts <- runEnrichments(
+      acc <- EitherT.liftF(runEnrichments(
                                registry,
-                               processor,
                                raw,
                                enriched,
                                extractResult.contexts,
                                extractResult.unstructEvent,
                                featureFlags.legacyEnrichmentOrder
-                             )
-      _ = ME.formatContexts(enrichmentsContexts ::: extractResult.validationInfoContexts ::: extractResult.validationFailures)
-            .foreach(c => enriched.derived_contexts = c)
+                             ))
+      enrichmentFailures = acc.errors ::: setupEnrichedEventResult.errors
+      _ = {
+        val derivedContexts = acc.contexts :::
+            extractResult.validationInfoContexts :::
+            extractResult.validationFailures :::
+            (if (enrichmentFailures.isEmpty) List.empty else List(EnrichmentFailure(enrichmentFailures).toSdj))
+        ME.formatContexts(derivedContexts)
+          .foreach(c => enriched.derived_contexts = c)
+      }
       _ <- IgluUtils
-             .validateEnrichmentsContexts[F](client, enrichmentsContexts, raw, processor, enriched)
+             .validateEnrichmentsContexts[F](client, acc.contexts, raw, processor, enriched)
       _ <- EitherT.rightT[F, BadRow](
              anonIp(enriched, registry.anonIp).foreach(enriched.user_ipaddress = _)
            )
@@ -97,11 +107,12 @@ object EnrichmentManager {
            }
       _ <- validateEnriched(enriched, raw, processor, featureFlags.acceptInvalid, invalidCount)
     } yield {
-      if (extractResult.validationFailures.isEmpty)
+      if (extractResult.validationFailures.isEmpty && enrichmentFailures.isEmpty)
         enriched.asRight
       else
         enriched.asLeft
     }
+  }
 
   /**
    * Run all the enrichments and aggregate the errors if any
@@ -112,31 +123,14 @@ object EnrichmentManager {
    */
   private def runEnrichments[F[_]: Monad](
     registry: EnrichmentRegistry[F],
-    processor: Processor,
     raw: RawEvent,
     enriched: EnrichedEvent,
     inputContexts: List[SelfDescribingData[Json]],
     unstructEvent: Option[SelfDescribingData[Json]],
     legacyOrder: Boolean
-  ): EitherT[F, BadRow.EnrichmentFailures, List[SelfDescribingData[Json]]] =
-    EitherT {
+  ): F[Accumulation] =
       accState(registry, raw, inputContexts, unstructEvent, legacyOrder)
         .runS(Accumulation(enriched, Nil, Nil))
-        .map {
-          case Accumulation(_, failures, contexts) =>
-            failures.toNel match {
-              case Some(nel) =>
-                buildEnrichmentFailuresBadRow(
-                  nel,
-                  EnrichedEvent.toPartiallyEnrichedEvent(enriched),
-                  RawEvent.toRawEvent(raw),
-                  processor
-                ).asLeft
-              case None =>
-                contexts.asRight
-            }
-        }
-    }
 
   private[enrichments] case class Accumulation(
     event: EnrichedEvent,
@@ -144,6 +138,18 @@ object EnrichmentManager {
     contexts: List[SelfDescribingData[Json]]
   )
   private[enrichments] type EStateT[F[_], A] = StateT[F, Accumulation, A]
+
+  case class EnrichmentFailure(errors: List[FailureDetails.EnrichmentFailure]) {
+    def toSdj: SelfDescribingData[Json] =
+      SelfDescribingData(EnrichmentFailure.schemaKey, (this: EnrichmentFailure).asJson)
+  }
+
+  object EnrichmentFailure {
+    val schemaKey = SchemaKey("com.snowplowanalytics", "partially_failed_enrichment_failure", "jsonschema", SchemaVer.Full(1, 0, 0))
+
+    implicit val enrichmentFailureEncoder: Encoder[EnrichmentFailure] =
+      deriveEncoder[EnrichmentFailure]
+  }
 
   private object EStateT {
     def apply[F[_]: Applicative, A](f: Accumulation => F[(Accumulation, A)]): EStateT[F, A] =
@@ -259,7 +265,7 @@ object EnrichmentManager {
     raw: RawEvent,
     etlTstamp: DateTime,
     processor: Processor
-  ): Either[BadRow.EnrichmentFailures, EnrichedEvent] = {
+  ): SetupEnrichedEventResult = {
     val e = new EnrichedEvent()
     e.event_id = EE.generateEventId() // May be updated later if we have an `eid` parameter
     e.v_collector = raw.source.name // May be updated later if we have a `cv` parameter
@@ -277,18 +283,11 @@ object EnrichmentManager {
     // Map/validate/transform input fields to enriched event fields
     val transformed = Transform.transform(raw, e)
 
-    (collectorTstamp |+| transformed)
-      .leftMap { enrichmentFailures =>
-        EnrichmentManager.buildEnrichmentFailuresBadRow(
-          enrichmentFailures,
-          EnrichedEvent.toPartiallyEnrichedEvent(e),
-          RawEvent.toRawEvent(raw),
-          processor
-        )
-      }
-      .as(e)
-      .toEither
+    val errors = (collectorTstamp |+| transformed).toEither.leftMap(_.toList).left.getOrElse(List.empty)
+    SetupEnrichedEventResult(errors, e)
   }
+
+  case class SetupEnrichedEventResult(errors: List[FailureDetails.EnrichmentFailure], event: EnrichedEvent)
 
   def setCollectorTstamp(event: EnrichedEvent, timestamp: Option[DateTime]): Either[FailureDetails.EnrichmentFailure, Unit] =
     EE.formatCollectorTstamp(timestamp).map { t =>
